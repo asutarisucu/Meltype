@@ -28,6 +28,12 @@ public sealed class HybridConverter(Func<ConversionEngine> engine, MozcConverter
         if (UseMozc) mozc!.Learn(context, clauses);
     }
 
+    /// <summary>確定した文節を、覚えさせずに Mozc の次の変換の文脈にする。</summary>
+    public void SetHistory(string? context, IReadOnlyList<ConversionClause> clauses)
+    {
+        if (UseMozc) mozc!.SetHistory(context, clauses);
+    }
+
     /// <summary>読みの候補の一覧 (Mozc → OS の変換エンジン)。</summary>
     public IReadOnlyList<string> Candidates(string reading)
     {

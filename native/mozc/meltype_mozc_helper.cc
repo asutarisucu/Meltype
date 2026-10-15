@@ -6,7 +6,11 @@
 //       変換。文節ごとに「読み<US>候補1<US>候補2…」を <RS> でつないで返す (US = 0x1F, RS = 0x1E)。変換できなければ空行。
 //   L<TAB>前の文字列<TAB>読み1<US>確定した文字列1<RS>読み2<US>確定した文字列2…
 //       学習。ユーザーが確定した文節の区切りと文字列を Mozc に覚えさせる。覚えたら "OK"、できなければ "NG"。
+//   H<TAB>前の文字列<TAB>読み1<US>確定した文字列1<RS>…
+//       L と同じ形で確定した文節を渡す。覚えさせずに、次の変換の文脈にだけする。できたら "OK"、できなければ "NG"。
 //   S   学習データを保存する ("OK")。
+// L・H で確定した文節は、次の C・L・H の前の文字列がその文節で終わっていれば、変換の文脈 (前の文節) にする。
+// そうでなければ、前の文字列の終わりの数字・英字を文脈にする (Mozc はかな・漢字で終わる文字列から文脈を作らない)。
 //   Q   保存して終了する。
 // 起動が終わったら "READY" を 1 行出す。引数 1 つ目は学習データの保存先 (省略可)。
 
@@ -17,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/strings/match.h"
 #include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
 #include "base/init_mozc.h"
@@ -54,7 +59,7 @@ class Helper {
   // 変換する。segments に結果が入る。
   bool Start(absl::string_view context, absl::string_view reading,
              mozc::Segments* segments) {
-    if (!context.empty()) {
+    if (!context.empty() && !UseHistory(context, segments)) {
       // 前の文字列を文脈にする (失敗しても変換は続ける)。
       (void)converter_->ReconstructHistory(segments, context);
     }
@@ -79,9 +84,22 @@ class Helper {
     return out;
   }
 
-  // ユーザーが確定した文節 (読みと文字列) を覚えさせる。同じ読みを変換し直し、文節の区切りを合わせて、
-  // 各文節で確定した文字列の候補を選んで確定する (Mozc 自身が確定したときと同じ学習になる)。
-  bool Learn(absl::string_view context, absl::string_view clauses) {
+  // ユーザーが確定した文節 (読みと文字列) を渡す。learn なら覚えさせる。確定した文節は次の変換の文脈にする。
+  bool Commit(absl::string_view context, absl::string_view clauses, bool learn) {
+    mozc::Segments segments;
+    const bool committed = Commit(context, clauses, learn, &segments);
+    // 確定できなかったら、前に確定した文節も文脈にしない (入力欄の文字列と合わなくなるため)。
+    history_ = committed ? segments : mozc::Segments();
+    return committed;
+  }
+
+  bool Save() { return engine_->Sync(); }
+
+ private:
+  // 同じ読みを変換し直し、文節の区切りを合わせて、各文節で確定した文字列の候補を選んで確定する
+  // (learn なら、Mozc 自身が確定したときと同じ学習になる)。確定した文節は segments に履歴の文節として残る。
+  bool Commit(absl::string_view context, absl::string_view clauses, bool learn,
+              mozc::Segments* segments) {
     std::vector<std::pair<std::string, std::string>> chosen;
     std::string reading;
     for (absl::string_view record : absl::StrSplit(clauses, kRecordSeparator)) {
@@ -92,8 +110,7 @@ class Helper {
     }
     if (chosen.empty()) return false;
 
-    mozc::Segments segments;
-    if (!Start(context, reading, &segments)) return false;
+    if (!Start(context, reading, segments)) return false;
     // 文節の区切りをユーザーが確定したものに合わせる (長さは文字数)。
     std::vector<uint8_t> sizes;
     for (const auto& [key, value] : chosen) {
@@ -101,14 +118,14 @@ class Helper {
       if (length == 0 || length > 255) return false;
       sizes.push_back(static_cast<uint8_t>(length));
     }
-    if (segments.conversion_segments_size() != chosen.size() ||
-        !SameKeys(segments, chosen)) {
-      if (!converter_->ResizeSegments(&segments, Request(), 0, sizes)) return false;
+    if (segments->conversion_segments_size() != chosen.size() ||
+        !SameKeys(*segments, chosen)) {
+      if (!converter_->ResizeSegments(segments, Request(), 0, sizes)) return false;
     }
-    if (segments.conversion_segments_size() != chosen.size()) return false;
+    if (segments->conversion_segments_size() != chosen.size()) return false;
 
     for (size_t i = 0; i < chosen.size(); ++i) {
-      const mozc::Segment& segment = segments.conversion_segment(i);
+      const mozc::Segment& segment = segments->conversion_segment(i);
       if (segment.key() != chosen[i].first) return false;
       int index = -1;
       for (size_t j = 0; j < segment.candidates_size(); ++j) {
@@ -119,15 +136,31 @@ class Helper {
       }
       // Mozc の候補に無い文字列 (Meltype の辞書や Microsoft IME の候補) は覚えさせられない。
       if (index < 0) return false;
-      if (!converter_->CommitSegmentValue(&segments, i, index)) return false;
+      if (!converter_->CommitSegmentValue(segments, i, index)) return false;
     }
-    converter_->FinishConversion(Request(), &segments);
+    // 覚えさせないときは、Mozc の学習を止めて確定する (確定した文節が履歴の文節になるのは同じ)。
+    converter_->FinishConversion(Request(/*learn=*/learn), segments);
     return true;
   }
 
-  bool Save() { return engine_->Sync(); }
+  // 前に確定した文節 (history_) のうち、context の終わりと一致する後ろの文節を segments に入れる。
+  // 1 つも一致しなければ false (入力欄の別の場所で打っている・あいだに別の文字を打った)。
+  bool UseHistory(absl::string_view context, mozc::Segments* segments) const {
+    size_t matched = 0;
+    std::string tail;
+    for (size_t i = history_.history_segments_size(); i > 0; --i) {
+      const mozc::Segment& segment = history_.history_segment(i - 1);
+      if (segment.candidates_size() == 0) break;
+      tail.insert(0, segment.candidate(0).value);
+      if (!absl::EndsWith(context, tail)) break;
+      ++matched;
+    }
+    if (matched == 0) return false;
+    *segments = history_;
+    while (segments->history_segments_size() > matched) segments->pop_front_segment();
+    return true;
+  }
 
- private:
   static bool SameKeys(const mozc::Segments& segments,
                        const std::vector<std::pair<std::string, std::string>>& chosen) {
     for (size_t i = 0; i < chosen.size(); ++i) {
@@ -136,11 +169,13 @@ class Helper {
     return true;
   }
 
-  mozc::ConversionRequest Request() {
+  mozc::ConversionRequest Request(bool learn = true) {
     mozc::ConversionRequest::Options options = {
         .request_type = mozc::ConversionRequest::CONVERSION,
         .max_conversion_candidates_size = 100,
         .create_partial_candidates = false,
+        // Mozc の学習 (確定したときに覚える・覚えた順に並べ替える) を止める
+        .incognito_mode = !learn,
     };
     return mozc::ConversionRequestBuilder()
         .SetComposer(composer_)
@@ -155,6 +190,8 @@ class Helper {
   const mozc::config::Config config_;
   std::shared_ptr<const mozc::ConverterInterface> converter_;
   mozc::composer::Composer composer_;
+  // 最後に確定した文節 (履歴の文節だけ。Mozc が文脈に使うのは後ろの 4 つまで)
+  mozc::Segments history_;
 };
 
 }  // namespace
@@ -184,8 +221,8 @@ int main(int argc, char** argv) {
     if (fields.empty() || fields[0] == "Q") break;
     if (fields[0] == "C" && fields.size() >= 3) {
       std::cout << helper.Convert(fields[1], fields[2]) << "\n";
-    } else if (fields[0] == "L" && fields.size() >= 3) {
-      std::cout << (helper.Learn(fields[1], fields[2]) ? "OK" : "NG") << "\n";
+    } else if ((fields[0] == "L" || fields[0] == "H") && fields.size() >= 3) {
+      std::cout << (helper.Commit(fields[1], fields[2], /*learn=*/fields[0] == "L") ? "OK" : "NG") << "\n";
     } else if (fields[0] == "S") {
       std::cout << (helper.Save() ? "OK" : "NG") << "\n";
     } else {

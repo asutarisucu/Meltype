@@ -51,6 +51,10 @@ internal static class Program
                 MozcCompare.Run(args[1], args[2]);
                 Henkan.Shutdown();
                 return 0;
+            case "--context-eval":
+                // --context-eval 入力ファイル 出力ファイル: 前に確定した文字列を文脈にした変換の正解率 (MELTYPE_MOZC が要る)
+                ContextEval.Run(args[1], args[2]);
+                return 0;
             case "--perf":
                 // --perf 出力ファイル [例文のファイル] [回数]: 変換エンジンの遅延・段階ごとの時間・候補の数・控えの使い回し・メモリ・正解率 (docs/PERFORMANCE.md)
                 Performance.Measure(args[1], args.ElementAtOrDefault(2), args.Length > 3 ? int.Parse(args[3]) : Performance.DefaultSamples);

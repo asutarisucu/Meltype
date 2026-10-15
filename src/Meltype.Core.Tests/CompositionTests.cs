@@ -2294,17 +2294,29 @@ internal static class CompositionTests
         Assert.True(history.Get("たす") is null, "記号を選んでも学習しない");
     }
 
-    /// <summary>覚えさせた文節を記録する変換エンジン (Mozc の代わり)。</summary>
+    /// <summary>覚えさせた文節・文脈にだけ渡した文節を記録する変換エンジン (Mozc の代わり)。</summary>
     private sealed class LearningConverter : IKanjiConverter, ILearningConverter
     {
         private readonly FakeConverter _inner = new();
         public List<string> Learned { get; } = [];
+        public List<string> Histories { get; } = [];
         public string? Convert(string hiragana) => _inner.Convert(hiragana);
         public IReadOnlyList<ConversionClause>? ConvertClauses(string hiragana, string? context = null) => _inner.ConvertClauses(hiragana, context);
 
         public void Learn(string? context, IReadOnlyList<ConversionClause> clauses)
         {
             lock (Learned) Learned.Add(string.Join("|", clauses.Select(c => $"{c.Reading}={c.Text}")));
+        }
+
+        public void SetHistory(string? context, IReadOnlyList<ConversionClause> clauses)
+        {
+            lock (Histories) Histories.Add(string.Join("|", clauses.Select(c => $"{c.Reading}={c.Text}")));
+        }
+
+        /// <summary>裏で渡すのを少し待つ。</summary>
+        public void Wait(Func<bool> done)
+        {
+            for (var i = 0; i < 100 && !done(); i++) Thread.Sleep(10);
         }
     }
 
@@ -2411,6 +2423,45 @@ internal static class CompositionTests
         // 覚えさせるのは裏で行うので、少し待つ。
         for (var i = 0; i < 100 && converter.Learned.Count == 0; i++) Thread.Sleep(10);
         Assert.Equal("たんいを=単位を|とる=取る", converter.Learned.SingleOrDefault() ?? "(なし)");
+        Assert.Equal(0, converter.Histories.Count, "覚えさせた文節は、変換エンジンの側で次の変換の文脈にもなる");
+    }
+
+    [Test]
+    public static void LiveCommit_PassesClausesAsContext()
+    {
+        // ライブ変換のまま Enter で確定した文節も、次の変換の文脈として変換エンジンに渡す (覚えさせない)。
+        var converter = new LearningConverter();
+        var k = new Keyboard(live: true, converter: converter);
+        k.Type("tanniwotoru\n");
+        Assert.Equal("単位を取る", k.Host.Document);
+        converter.Wait(() => converter.Histories.Count > 0);
+        Assert.Equal("たんいを=単位を|とる=取る", converter.Histories.SingleOrDefault() ?? "(なし)");
+        Assert.Equal(0, converter.Learned.Count, "Space で変換していないので覚えさせない");
+    }
+
+    [Test]
+    public static void LiveCommit_EndingInEnglish_PassesNoContext()
+    {
+        // 終わりが英語なら渡さない (次の変換の文脈は、前の文字列の終わりの英字になる)。
+        var converter = new LearningConverter();
+        var k = new Keyboard(live: true, converter: converter);
+        k.Type("kyouhagoogle\n");
+        Assert.Equal("今日はgoogle", k.Host.Document);
+        converter.Wait(() => converter.Histories.Count > 0);
+        Assert.Equal(0, converter.Histories.Count, string.Join(",", converter.Histories));
+    }
+
+    [Test]
+    public static void LearningOff_PassesClausesAsContextOnly()
+    {
+        // 設定「ユーザー学習を使う」が OFF なら覚えさせないが、次の変換の文脈にはする。
+        var converter = new LearningConverter();
+        var k = new Keyboard(converter: converter) { Learning = false };
+        k.Type("tanniwotoru ");
+        k.Press(VirtualKeys.Return);
+        converter.Wait(() => converter.Histories.Count > 0);
+        Assert.Equal("たんいを=単位を|とる=取る", converter.Histories.SingleOrDefault() ?? "(なし)");
+        Assert.Equal(0, converter.Learned.Count, "覚えさせない");
     }
 
     /// <summary>わたしのことがすき・しのがきた を区切る変換エンジン (ユーザー辞書の語が文節の途中に入るテスト用)。</summary>

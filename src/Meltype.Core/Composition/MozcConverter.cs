@@ -106,18 +106,23 @@ public sealed class MozcConverter : IKanjiConverter, ILearningConverter, IDispos
     private int _learnedSinceSave;
 
     /// <summary>確定した文節を Mozc に覚えさせる (Mozc の候補に無い文字列の文節があれば覚えない)。</summary>
-    public void Learn(string? context, IReadOnlyList<ConversionClause> clauses)
+    public void Learn(string? context, IReadOnlyList<ConversionClause> clauses) => Commit('L', context, clauses);
+
+    /// <summary>確定した文節を、覚えさせずに次の変換の文脈にする (Mozc の候補に無い文字列の文節があれば文脈にしない)。</summary>
+    public void SetHistory(string? context, IReadOnlyList<ConversionClause> clauses) => Commit('H', context, clauses);
+
+    private void Commit(char command, string? context, IReadOnlyList<ConversionClause> clauses)
     {
         if (clauses.Count == 0 || !IsAvailable) return;
         var records = string.Join(RecordSeparator, clauses.Select(c => Clean(c.Reading).Replace(UnitSeparator, ' ') + UnitSeparator + Clean(c.Text).Replace(UnitSeparator, ' ')));
         lock (_gate)
         {
             if (_disposed) return;
-            // 覚えさせると候補の順番が変わるので、候補の控えを捨てる。
+            // 覚えさせると候補の順番が変わり、前の文節が変わると変換の結果も変わるので、控えを捨てる。
             _candidates.Clear();
             _conversions.Clear();
-            var result = Send($"L\t{Clean(context ?? "")}\t{records}");
-            if (result == "OK" && ++_learnedSinceSave >= SaveEvery)
+            var result = Send($"{command}\t{Clean(context ?? "")}\t{records}");
+            if (command == 'L' && result == "OK" && ++_learnedSinceSave >= SaveEvery)
             {
                 _learnedSinceSave = 0;
                 Send("S");

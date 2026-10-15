@@ -265,7 +265,10 @@ public sealed class CompositionController
     private readonly ICompositionHost _host;
     private readonly CompositionOptions _options;
     private readonly Dictionary<string, string> _conversionCache = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, string> _liveCache = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, List<Clause>> _liveCache = new(StringComparer.Ordinal);
+
+    /// <summary>最後にライブ変換した文節 (ライブ変換のまま確定したら、変換エンジンに次の変換の文脈として渡す)。</summary>
+    private List<Clause>? _lastLive;
     private readonly HashSet<int> _swallowedShift = [];
     private readonly HashSet<int> _swallowedControl = [];
     private readonly HashSet<int> _replayedDown = [];
@@ -921,6 +924,7 @@ public sealed class CompositionController
     private void BeginComposition()
     {
         _keptChoices.Clear();
+        _lastLive = null;
         _modeByKey = false;
         _text.KanaInput = _options.KanaInput();
         _text.Punctuation = _options.Punctuation();
@@ -2036,13 +2040,20 @@ public sealed class CompositionController
     /// </summary>
     private string LiveConvert(string kana)
     {
-        if (kana.Length < LiveConversionMinLength) return kana;
+        if (kana.Length < LiveConversionMinLength)
+        {
+            _lastLive = null;
+            return kana;
+        }
         var key = string.Join("\u0001", kana, _precedingText, _followingText, _options.History?.Version);
-        if (_liveCache.TryGetValue(key, out var cached)) return cached;
-        var converted = string.Concat(ConvertJapanese(kana).Select(c => c.Text));
-        if (_liveCache.Count > 256) _liveCache.Clear();
-        _liveCache[key] = converted;
-        return converted;
+        if (!_liveCache.TryGetValue(key, out var clauses))
+        {
+            clauses = ConvertJapanese(kana);
+            if (_liveCache.Count > 256) _liveCache.Clear();
+            _liveCache[key] = clauses;
+        }
+        _lastLive = clauses;
+        return string.Concat(clauses.Select(c => c.Text));
     }
 
     /// <summary>今の表示 (ライブ変換が有効なら日本語区間は漢字に変換済み)。</summary>
@@ -2085,7 +2096,11 @@ public sealed class CompositionController
         }
         RecordCorrection(converting, text, suffix);
         if (converting) Learn();
-        else LearnLanguage();
+        else
+        {
+            LearnLanguage();
+            PassLiveConversion(text);
+        }
         RememberPhrase(converting ? string.Concat(_clauses.Select(c => c.IsEnglish ? "" : c.Reading)) : _text.AllKana(final: true), text, english);
         CommitText(text + suffix, english, _text.Raw, chosen, preserveText);
     }
@@ -2288,8 +2303,12 @@ public sealed class CompositionController
     /// <summary>選び直した文節を学習する (次に同じ読みを変換したとき最初の候補にする)。</summary>
     private void Learn()
     {
-        // 設定「ユーザー学習を使う」が OFF なら、新しく覚えない (issue #277)
-        if (!_options.Learning()) return;
+        // 設定「ユーザー学習を使う」が OFF なら、新しく覚えない (issue #277)。変換エンジンには次の変換の文脈としてだけ渡す
+        if (!_options.Learning())
+        {
+            PassConversion(_clauses, learn: false);
+            return;
+        }
         // 変換の候補から打ったままの英字 (api) を選んで確定したら、その語は次から英字にする (F10 と同じ)。
         foreach (var clause in _clauses.Where(c => !c.IsEnglish && c.Changed && c.Raw is { } raw && c.Text == raw))
         {
@@ -2305,7 +2324,7 @@ public sealed class CompositionController
         {
             _options.TranslationHistory?.Remember(clause.Reading, clause.Text);
         }
-        LearnConversion();
+        PassConversion(_clauses, learn: true);
         if (_options.History is not { } history) return;
         // 1 文字の読み (き → 記) を覚えると、関係ない変換 (き + ごうとう) まで巻き込むので 2 文字以上だけ。
         foreach (var clause in _clauses.Where(c => !c.IsEnglish && c.Changed && c.Reading.Length >= 2))
@@ -2321,10 +2340,11 @@ public sealed class CompositionController
     }
 
     /// <summary>
-    /// 変換エンジン (Mozc) にも、確定した文節を覚えさせる。英語の文節・打ったままの英字で区切った、日本語の文節のまとまりごとに。
+    /// 変換エンジン (Mozc) に、確定した文節を渡す。英語の文節・打ったままの英字で区切った、日本語の文節のまとまりごとに。
+    /// learn なら覚えさせる。覚えさせないときも、次の変換の文脈 (前の文節) にはする。
     /// 変換エンジンとのやり取りで入力を待たせないよう、裏で行う。
     /// </summary>
-    private void LearnConversion()
+    private void PassConversion(IEnumerable<Clause> clauses, bool learn)
     {
         if (_converter is not ILearningConverter learner) return;
         var context = ConversionContext();
@@ -2332,11 +2352,15 @@ public sealed class CompositionController
         void Flush()
         {
             if (run.Count == 0) return;
-            var clauses = run.ToList();
+            var passed = run.ToList();
             run.Clear();
-            ThreadPool.QueueUserWorkItem(_ => learner.Learn(context, clauses));
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                if (learn) learner.Learn(context, passed);
+                else learner.SetHistory(context, passed);
+            });
         }
-        foreach (var clause in _clauses)
+        foreach (var clause in clauses)
         {
             if (clause.IsEnglish || clause.Text == clause.Raw || clause.Translations.Contains(clause.Text) || clause.Reading.Any(char.IsAsciiLetterOrDigit) || IsDateTimeChoice(clause) || IsMathSymbolChoice(clause))
             {
@@ -2346,6 +2370,19 @@ public sealed class CompositionController
             run.Add(new ConversionClause(clause.Reading, clause.Text));
         }
         Flush();
+    }
+
+    /// <summary>
+    /// ライブ変換のまま (Space を押さずに) 確定したら、確定した文字列の終わりのライブ変換の文節を、次の変換の文脈として変換エンジンに渡す
+    /// (覚えさせない)。終わりが英語や、ライブ変換していないかなのときは渡さない。
+    /// </summary>
+    private void PassLiveConversion(string text)
+    {
+        var live = _lastLive;
+        _lastLive = null;
+        if (live is null || _text.Mode != DisplayMode.Auto) return;
+        if (!text.EndsWith(string.Concat(live.Select(c => c.Text)), StringComparison.Ordinal)) return;
+        PassConversion(live, learn: false);
     }
 
     /// <summary>確定して入力する。英語だったか日本語だったか・確定した文字列を、次の入力の文脈として覚えておく。</summary>

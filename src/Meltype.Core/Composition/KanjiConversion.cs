@@ -21,9 +21,15 @@ public interface IKanjiConverter
     IReadOnlyList<ConversionClause>? ConvertClauses(string hiragana, string? context = null);
 }
 
-/// <summary>確定した変換を覚えられる変換エンジン (Mozc)。次から同じ読みで同じ文字列を先に出す。</summary>
+/// <summary>
+/// 確定した変換を覚えられる変換エンジン (Mozc)。次から同じ読みで同じ文字列を先に出す。
+/// 確定した文節は、次の変換の文脈 (前の文節) にもなる (次の変換の context が、確定した文字列で終わっているとき)。
+/// </summary>
 public interface ILearningConverter
 {
     /// <summary>ユーザーが確定した文節 (読みと文字列、区切りも確定したとおり) を覚えさせる。context は直前の確定済みの文字列。</summary>
     void Learn(string? context, IReadOnlyList<ConversionClause> clauses);
+
+    /// <summary>確定した文節を、覚えさせずに次の変換の文脈にだけする。context は直前の確定済みの文字列。</summary>
+    void SetHistory(string? context, IReadOnlyList<ConversionClause> clauses);
 }
