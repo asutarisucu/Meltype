@@ -59,6 +59,12 @@ public interface ICompositionHost
         CommitText(text);
     }
 
+    /// <summary>
+    /// 確定し直し: キャレットの前の count 文字を replacement に置き換えて、続けて今確定した語 (current) を入れる。
+    /// 前の文字を消せなかったときに current だけを入れられるように、分けて渡す (Meltype IME など。<see cref="TextEdit"/>)。
+    /// </summary>
+    void ReplaceBackward(int count, string replacement, string current) => ReplaceBackward(count, replacement + current);
+
     void RecordDirectReplay(char c) { }
 
     /// <summary>
@@ -2787,7 +2793,7 @@ public sealed class CompositionController
         if (_pendingReplace is var (count, replacement))
         {
             _pendingReplace = null;
-            _host.ReplaceBackward(count, replacement + text);
+            _host.ReplaceBackward(count, replacement, text);
         }
         else _host.CommitText(text);
         // 設定「カッコを打ったら中にカーソルを移動」: カッコの組だけを確定したら、← を送って中に入る (issue #72)

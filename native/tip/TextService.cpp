@@ -1169,7 +1169,7 @@ void TextService::Apply(TfEditCookie ec, ITfContext* context, const JsonValue& r
     // キャレットの位置に入れると、クリックした所に入ったり、選んでいた文字を上書きしたりする)
     Microsoft::WRL::ComPtr<ITfRange> next;
     for (const JsonValue& edit : reply[L"commits"].array) {
-        const std::wstring& text = edit[L"text"].Str();
+        const std::wstring* text = &edit[L"text"].Str();
         int deleteBefore = edit[L"deleteBefore"].Int();
         Microsoft::WRL::ComPtr<ITfRange> range;
         if (composition_ != nullptr) {
@@ -1185,18 +1185,18 @@ void TextService::Apply(TfEditCookie ec, ITfContext* context, const JsonValue& r
         // 確定し直し: 前に確定した文字を消して入れ直す。前の文字が確定したときのままでなければ (アプリが書き換えた・前の文字を読めない)、
         // 関係ない文字を消したり、古い文字に重ねて入れたりしないように、確定し直さない
         if (deleteBefore > 0) {
-            bool composing = composition_ != nullptr;
             if (ExtendOverPrevious(ec, range.Get(), deleteBefore, edit[L"expect"])) {
                 // 変換中は、変換中の文字の外 (前に確定した文字) を書き換えられないアプリがある (TF_E_RANGE_NOT_COVERED)。
                 // 変換を終えてから、前に確定した文字と変換中だった文字をまとめて書き換える
-                if (composing) EndComposition(ec);
-            } else if (!composing) {
+                if (composition_ != nullptr) EndComposition(ec);
+            } else if (edit[L"current"].type == JsonValue::Type::String) {
+                // 前の文字は消さずに、今確定した語だけを入れる (確定し直しは今の語の確定と 1 つにまとめて届くので、飛ばすと今の語まで消える)
+                text = &edit[L"current"].Str();
+            } else {
                 continue;
             }
-            // 変換中で、前の文字が確定したときのままか確かめられない: 前の文字は消さずに、変換中の文字をこの確定の文字にする
-            // (確定し直しは今の語の確定と 1 つにまとめて届くので、飛ばすと今の語まで消える)
         }
-        if (!WriteCommit(ec, context, range.Get(), text)) continue;
+        if (!WriteCommit(ec, context, range.Get(), *text)) continue;
         next.Reset();
         if (SUCCEEDED(range->Clone(&next))) next->Collapse(ec, TF_ANCHOR_END);
     }

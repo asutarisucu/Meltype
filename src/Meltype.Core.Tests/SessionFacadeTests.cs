@@ -326,6 +326,10 @@ internal static class SessionFacadeTests
         Assert.Equal(first, correction.Expect);
         Assert.Equal(first.Length, correction.DeleteBefore);
         Assert.True(new SessionResult(true, [correction], null).ToJson().Contains("\"expect\":"), "JSON にも入れる");
+        // 前の文字を消せないときに今の語だけを入れられるように、今の語も分けて渡す (Text をそのまま入れると I が二重に入る)
+        Assert.Equal("I want ", correction.Text);
+        Assert.Equal("want ", correction.Current);
+        Assert.True(new SessionResult(true, [correction], null).ToJson().Contains("\"current\":\"want \""), "JSON にも入れる");
     }
 
     [Test]
@@ -364,8 +368,8 @@ internal static class SessionFacadeTests
     {
         var session = Create();
         var commit = Type(session, "kyouha\n")[^1].Commits.Single();
-        Assert.True(commit.Expect is null, "消さない確定には付けない");
-        Assert.True(!new SessionResult(true, [commit], null).ToJson().Contains("expect"), "JSON にも入れない");
+        Assert.True(commit.Expect is null && commit.Current is null, "消さない確定には付けない");
+        Assert.True(!new SessionResult(true, [commit], null).ToJson().Contains("expect") && !new SessionResult(true, [commit], null).ToJson().Contains("current"), "JSON にも入れない");
     }
 
     [Test]
