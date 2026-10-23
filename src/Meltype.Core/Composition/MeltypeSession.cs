@@ -14,6 +14,8 @@ namespace Meltype.Composition;
 /// Current は、確定し直すときに Text の後ろに続けて入る、今確定した語 (確定し直しは今の語の確定とまとめて届く)。
 /// フロントは、キャレットの前が Expect と一致すると確認できたときだけ消す。確認できないときは前の文字を消さずに Current を入れる
 /// (Current が無ければ Text)。Text を入れると、直した前の語が二重に入る。Edit ごと捨てると、打った文字が消えて入力欄と本体がずれる。
+/// Current だけを入れたときも、本体は Text が入った前提で確定した文字を覚える。直せなかった前の語まで消す確定し直しは、
+/// 次の Expect が入力欄と合わないので、フロントは前の文字を消さない (それ以上その語は直さない)。
 /// DeleteBefore は本体の単位 (UTF-16) の長さなので、消す文字数は Expect から入力欄の単位で数える。
 /// </summary>
 public readonly record struct TextEdit(int DeleteBefore, string Text, string? Expect = null, string? Current = null);
